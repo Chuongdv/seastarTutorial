@@ -1,0 +1,252 @@
+/*
+ * This file is open source software, licensed to you under the terms
+ * of the Apache License, Version 2.0 (the "License").  See the NOTICE file
+ * distributed with this work for additional information regarding copyright
+ * ownership.  You may not use this file except in compliance with the License.
+ *
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+/*
+ * Copyright 2015 Cloudius Systems
+ */
+#include <cmath>
+#include "seastar/core/reactor.hh"
+#include "seastar/core/app-template.hh"
+#include "seastar/rpc/rpc.hh"
+#include "seastar/core/sleep.hh"
+#include "seastar/rpc/lz4_compressor.hh"
+#include <unordered_map>
+#include <map>
+
+using namespace seastar;
+
+struct serializer {
+};
+
+template <typename T, typename Output>
+inline
+void write_arithmetic_type(Output& out, T v) {
+    static_assert(std::is_arithmetic<T>::value, "must be arithmetic type");
+    return out.write(reinterpret_cast<const char*>(&v), sizeof(T));
+}
+
+template <typename T, typename Input>
+inline
+T read_arithmetic_type(Input& in) {
+    static_assert(std::is_arithmetic<T>::value, "must be arithmetic type");
+    T v;
+    in.read(reinterpret_cast<char*>(&v), sizeof(T));
+    return v;
+}
+
+template <typename Output>
+inline void write(serializer, Output& output, int32_t v) { return write_arithmetic_type(output, v); }
+template <typename Output>
+inline void write(serializer, Output& output, uint32_t v) { return write_arithmetic_type(output, v); }
+template <typename Output>
+inline void write(serializer, Output& output, int64_t v) { return write_arithmetic_type(output, v); }
+template <typename Output>
+inline void write(serializer, Output& output, uint64_t v) { return write_arithmetic_type(output, v); }
+template <typename Output>
+inline void write(serializer, Output& output, double v) { return write_arithmetic_type(output, v); }
+template <typename Input>
+inline int32_t read(serializer, Input& input, rpc::type<int32_t>) { return read_arithmetic_type<int32_t>(input); }
+template <typename Input>
+inline uint32_t read(serializer, Input& input, rpc::type<uint32_t>) { return read_arithmetic_type<uint32_t>(input); }
+template <typename Input>
+inline uint64_t read(serializer, Input& input, rpc::type<uint64_t>) { return read_arithmetic_type<uint64_t>(input); }
+template <typename Input>
+inline uint64_t read(serializer, Input& input, rpc::type<int64_t>) { return read_arithmetic_type<int64_t>(input); }
+template <typename Input>
+inline double read(serializer, Input& input, rpc::type<double>) { return read_arithmetic_type<double>(input); }
+
+template <typename Output>
+inline void write(serializer, Output& out, const sstring& v) {
+    write_arithmetic_type(out, uint32_t(v.size()));
+    out.write(v.c_str(), v.size());
+}
+
+template <typename Input>
+inline sstring read(serializer, Input& in, rpc::type<sstring>) {
+    auto size = read_arithmetic_type<uint32_t>(in);
+    sstring ret(sstring::initialized_later(), size);
+    in.read(ret.begin(), size);
+    return ret;
+}
+
+namespace bpo = boost::program_options;
+using namespace std::chrono_literals;
+
+class mycomp : public rpc::compressor::factory {
+    const sstring _name = "LZ4";
+public:
+    virtual const sstring& supported() const override {
+        fmt::print("supported called\n");
+        return _name;
+    }
+    virtual std::unique_ptr<rpc::compressor> negotiate(sstring feature, bool is_server) const override {
+        fmt::print("negotiate called with {}\n", feature);
+        return feature == _name ? std::make_unique<rpc::lz4_compressor>() : nullptr;
+    }
+};
+
+class database {
+private:
+    std::unordered_map<sstring, std::unordered_map<sstring, sstring>> DB;
+public:
+
+    future<> creatTable(sstring tableKey) {
+
+        std::unordered_map<sstring, sstring> table;
+        bool ok = DB.insert({tableKey, table}).second;
+        std::cout<<"creat table" <<std::endl;
+        return make_ready_future<>();
+    }
+
+
+    sstring readData(sstring tableKey, sstring keyData) {
+        std::cout<<"read data" <<std::endl;
+        auto table = DB.find(tableKey);
+        if (table == DB.end())
+            //return make_ready_future<>();
+            return "error";
+        else {
+            auto data = (table->second).find(keyData);
+            if (data == (table->second).end()) {
+                //return make_ready_future<>();
+                return "error";
+            } else {
+                //return make_ready_future<>();
+                return data->second;
+            }
+        }
+    }
+
+    future<> insertData(sstring tableKey, sstring keyData, sstring value) {
+        std::cout<<"insert data: " << value << std::endl;
+        auto table = DB.find(tableKey);
+        if (table == DB.end())
+            return make_ready_future<>();
+        else {
+            bool ok = ((table->second).insert({keyData, value})).second;
+            return make_ready_future<>();
+        }
+    }
+
+    future<> updateData(sstring tableKey, sstring keyData, sstring value) {
+        std::cout<<"update data" <<std::endl;
+        auto table = DB.find(tableKey);
+        if (table == DB.end())
+            return make_ready_future<>();
+        else {
+            auto data = (table->second).find(keyData);
+            if (data == (table->second).end()) {
+                return make_ready_future<>();
+            } else {
+                data->second = value;
+                return make_ready_future<>();
+            }
+        }
+    }
+
+
+    future<> deleteData(sstring tableKey, sstring keyData) {
+        std::cout<<"delete data" <<std::endl;
+        auto table = DB.find(tableKey);
+        if (table == DB.end())
+            return make_ready_future<>();
+        else {
+            auto data = (table->second).find(keyData);
+            if (data == (table->second).end()) {
+                return make_ready_future<>();
+            } else {
+                (table->second).erase(data);
+                return make_ready_future<>();
+            }
+        }
+    }
+
+    future<> deleteTable(sstring tableKey) {
+        std::cout<<"delete table" <<std::endl;
+        auto table = DB.find(tableKey);
+        if (table == DB.end())
+            return make_ready_future<>();
+        else {
+            DB.erase(table);
+            return make_ready_future<>();
+        }
+    }
+};
+
+database DATABASE;
+
+int main(int ac, char** av) {
+
+    std::cout << "start ";
+    rpc::protocol<serializer> myrpc(serializer{});
+    static std::unique_ptr<rpc::protocol<serializer>::server> server;
+    static std::unique_ptr<rpc::protocol<serializer>::client> client;
+    static double x = 30.0;
+
+    myrpc.set_logger([] (const sstring& log) {
+        print("%s", log);
+        std::cout << std::endl;
+    });
+    app_template app;
+
+    return app.run_deprecated(ac, av, [&] {
+        auto&& config = app.configuration();
+        uint16_t port = 9999;
+        bool compress = false;
+        static mycomp mc;
+
+            std::cout << "server on port " << port << std::endl;
+
+           myrpc.register_handler(1, [](sstring tableKey){
+               return DATABASE.creatTable(tableKey);
+           });
+           myrpc.register_handler(2, [](sstring tableKey, sstring keyData){
+               sstring result = DATABASE.readData(tableKey, keyData);
+               return make_ready_future<sstring>(result);
+           });
+
+        myrpc.register_handler(3, [](sstring tableKey, sstring keyData, sstring value){
+            return DATABASE.insertData(tableKey, keyData, value);
+        });
+
+
+           myrpc.register_handler(4, [](sstring tableKey, sstring keyData, sstring value){
+               return DATABASE.updateData(tableKey, keyData, value);
+           });
+
+           myrpc.register_handler(5, [](sstring tableKey, sstring keyData){
+               return DATABASE.deleteData(tableKey, keyData);
+           });
+
+        myrpc.register_handler(6, [](sstring tableKey){
+            return DATABASE.deleteTable(tableKey);
+        });
+
+
+            rpc::resource_limits limits;
+            limits.bloat_factor = 1;
+            limits.basic_request_size = 0;
+            limits.max_memory = 10'000'000;
+            rpc::server_options so;
+            if (compress) {
+                so.compressor_factory = &mc;
+            }
+            server = std::make_unique<rpc::protocol<serializer>::server>(myrpc, so, ipv4_addr{port}, limits);
+
+    });
+
+}
